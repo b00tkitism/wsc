@@ -10,30 +10,31 @@ const (
 )
 
 type Limitation struct {
-	Type  LimitationType
-	Value any
+	Type         LimitationType `json:"type"`
+	TrafficBytes uint64         `json:"traffic_bytes,omitempty"`
+	Duration     time.Duration  `json:"duration,omitempty"`
 }
 
 func NewTrafficLimitation(trafficBytes uint64) *Limitation {
 	return &Limitation{
-		Type:  LimitationTypeTrafficBytes,
-		Value: trafficBytes,
+		Type:         LimitationTypeTrafficBytes,
+		TrafficBytes: trafficBytes,
 	}
 }
 
 func NewDurationLimitation(duration time.Duration) *Limitation {
 	return &Limitation{
-		Type:  LimitationTypeDuration,
-		Value: duration,
+		Type:     LimitationTypeDuration,
+		Duration: duration,
 	}
 }
 
 func (l *Limitation) IsLimited(user *User) bool {
 	switch l.Type {
 	case LimitationTypeTrafficBytes:
-		return user.usedTrafficBytes >= l.Value.(uint64)
+		return user.UsedTrafficBytes >= l.TrafficBytes
 	case LimitationTypeDuration:
-		return user.creationDate.Before(user.creationDate.Add(l.Value.(time.Duration)))
+		return time.Since(user.CreationDate) >= l.Duration
 	default:
 		return false
 	}
