@@ -2,10 +2,10 @@ package proxy
 
 import (
 	"net"
-	"sync"
 	"time"
 
 	"github.com/b00tkitism/wsc/metric"
+	"github.com/google/uuid"
 )
 
 type Proxy struct {
@@ -14,8 +14,7 @@ type Proxy struct {
 	Metric                    *metric.Metric
 	MaximumConnectionsPerUser uint8
 
-	mu    sync.RWMutex
-	Users []*User
+	Users map[string]*User
 }
 
 func NewProxy(listenAddress net.Addr, metricSendingInterval time.Duration, metricServer *metric.Metric, maximumConnectionsPerUser uint8) *Proxy {
@@ -24,25 +23,14 @@ func NewProxy(listenAddress net.Addr, metricSendingInterval time.Duration, metri
 		MetricSendingInterval:     metricSendingInterval,
 		Metric:                    metricServer,
 		MaximumConnectionsPerUser: maximumConnectionsPerUser,
-		Users:                     []*User{},
+		Users:                     map[string]*User{},
 	}
 }
 
-func (p *Proxy) GetUserByToken(token string) *User {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, user := range p.Users {
-		if user.Token == token {
-			return user
-		}
-	}
-	return nil
-}
-
-func (p *Proxy) AddUser(user *User) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.Users = append(p.Users, user)
+func (p *Proxy) AddUser(user *User) string {
+	token := uuid.NewString()
+	p.Users[token] = user
+	return token
 }
 
 func (p *Proxy) Run() {
@@ -50,8 +38,6 @@ func (p *Proxy) Run() {
 }
 
 func (p *Proxy) SendMetrics() {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
 	for _, user := range p.Users {
 		data, err := user.ExportAsJson()
 		if err != nil {
