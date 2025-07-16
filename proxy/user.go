@@ -1,57 +1,72 @@
 package proxy
 
 import (
+	"encoding"
 	"encoding/json"
-	"time"
-
-	"github.com/google/uuid"
+	"errors"
+	"math"
+	"net"
+	"sync"
+	"sync/atomic"
 )
 
+var _ encoding.TextMarshaler = &User{}
+
 type User struct {
-	Token            string        `json:"token"`
-	UsedTrafficBytes uint64        `json:"used_bytes"`
-	CreationDate     time.Time     `json:"creation_date"`
-	Limitations      []*Limitation `json:"limitations"`
+	ID                   int64        `json:"id"`
+	UsedTrafficBytes     atomic.Int64 `json:"used_bytes"`
+	ReportedTrafficBytes atomic.Int64 `json:"reported_traffic_bytes"`
+
+	LastTrafficUpdateTick atomic.Int64
+	Conns                 map[net.Conn]int64
+
+	connMutex sync.Mutex
 }
 
-func NewEmptyUser() *User {
-	return &User{
-		Token:            uuid.NewString(),
-		UsedTrafficBytes: 0,
-		CreationDate:     time.Now(),
-		Limitations:      []*Limitation{},
+func NewUser(id int64, usedTrafficBytes int64, maxConnCount int) *User {
+	user := &User{
+		ID:    id,
+		Conns: make(map[net.Conn]int64, maxConnCount),
 	}
+	user.UsedTrafficBytes.Store(usedTrafficBytes)
+	user.ReportedTrafficBytes.Store(0)
+	user.LastTrafficUpdateTick.Store(0)
+	return user
 }
 
-func NewUser(token string, usedTrafficBytes uint64, creationDate time.Time, limitations []*Limitation) *User {
-	return &User{
-		Token:            token,
-		UsedTrafficBytes: usedTrafficBytes,
-		CreationDate:     creationDate,
-		Limitations:      limitations,
+func (user *User) AddConn(conn net.Conn, limit int) (net.Conn, error) {
+	user.connMutex.Lock()
+	defer user.connMutex.Unlock()
+	if _, exists := user.Conns[conn]; exists {
+		return nil, errors.New("connection already exists")
 	}
-}
-
-func (u *User) AddLimitation(limitation *Limitation) bool {
-	for _, l := range u.Limitations {
-		if l.Type == limitation.Type {
-			return false
+	var selectedConn net.Conn = nil
+	if len(user.Conns) >= limit {
+		minTime := int64(math.MaxInt64)
+		for c, time := range user.Conns {
+			if time < minTime {
+				minTime = time
+				selectedConn = c
+			}
+		}
+		if selectedConn != nil {
+			delete(user.Conns, selectedConn)
 		}
 	}
-	u.Limitations = append(u.Limitations, limitation)
-	return true
+	user.Conns[conn] = nowns()
+	return selectedConn, nil
 }
 
-func (u *User) IsLimited() bool {
-	for _, l := range u.Limitations {
-		if l.IsLimited(u) {
-			return true
-		}
+func (user *User) RemoveConn(conn net.Conn) error {
+	user.connMutex.Lock()
+	defer user.connMutex.Unlock()
+	if _, exists := user.Conns[conn]; !exists {
+		return errors.New("connection doesn't exist")
 	}
-	return false
+	delete(user.Conns, conn)
+	return nil
 }
 
-func (u *User) ExportAsJson() (string, error) {
-	result, err := json.Marshal(u)
-	return string(result), err
+func (user *User) MarshalText() (text []byte, err error) {
+	return json.Marshal(user)
 }
