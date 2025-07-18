@@ -101,8 +101,8 @@ func (pro *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}()
 
 	if err := pro.pipeConn(ctx, user, conn, tcpAddr); err != nil {
-		http.Error(writer, "Failed to pipe connection: "+err.Error(), http.StatusInternalServerError)
 		slog.Debug("Failed to pipe connection: "+err.Error(), slog.String("client", request.RemoteAddr), slog.Int64("user-id", uid))
+		http.Error(writer, "Failed to pipe connection: "+err.Error(), http.StatusInternalServerError)
 	}
 }
 
@@ -140,7 +140,7 @@ func (pro *Proxy) pipeConn(ctx context.Context, user *User, conn net.Conn, targe
 
 func (pro *Proxy) pipeWSToTCP(ctx context.Context, user *User, wsConn net.Conn, tcpConn net.Conn) error {
 	wsReader := wsutil.NewReader(wsConn, ws.StateServerSide)
-	pack := make([]byte, 32*1024)
+	pack := make([]byte, 2048)
 
 	for {
 		if ctx.Err() != nil {
@@ -226,7 +226,7 @@ func (pro *Proxy) findUser(ctx context.Context, uid int64) *User {
 	pro.userMutex.Lock()
 	defer pro.userMutex.Unlock()
 	if user, exists := pro.Users[uid]; exists {
-		_, _ = pro.reportUser(ctx, user, false)
+		pro.reportUser(ctx, user, false)
 		return user
 	}
 	user := NewUser(uid, 0, pro.MaximumConnectionsPerUser)
@@ -240,7 +240,7 @@ func (pro *Proxy) cleanupUser(ctx context.Context, uid int64) error {
 	if user, exists := pro.Users[uid]; !exists {
 		return errors.New("user doesn't exist")
 	} else {
-		_, _ = pro.reportUser(ctx, user, true)
+		pro.reportUser(ctx, user, true)
 		for conn := range user.Conns {
 			conn.Close()
 		}
@@ -249,35 +249,37 @@ func (pro *Proxy) cleanupUser(ctx context.Context, uid int64) error {
 	}
 }
 
-func (pro *Proxy) reportUser(ctx context.Context, user *User, force bool) (bool, error) {
+func (pro *Proxy) reportUser(ctx context.Context, user *User, force bool) bool {
 	usedTraffic := user.UsedTrafficBytes.Load()
 	reportedTraffic := user.ReportedTrafficBytes.Load()
 	trafficResult := usedTraffic - reportedTraffic
 	now := nowns()
 	if !force {
 		if trafficResult == 0 {
-			return false, nil
+			return false
 		}
 		if trafficResult < pro.UsageReportTrafficInterval && time.Duration(now-user.LastTrafficUpdateTick.Load()) < pro.UsageReportTimeInterval {
-			return false, nil
+			return false
 		}
 	}
-	err := pro.Auth.ReportUsage(ctx, user.ID, trafficResult)
-	if err == nil {
-		user.ReportedTrafficBytes.Store(usedTraffic)
-		user.LastTrafficUpdateTick.Store(now)
-	}
-	return true, err
+	go func() {
+		err := pro.Auth.ReportUsage(ctx, user.ID, trafficResult)
+		if err == nil {
+			user.ReportedTrafficBytes.Store(usedTraffic)
+			user.LastTrafficUpdateTick.Store(now)
+		}
+	}()
+	return true
 }
 
 func (pro *Proxy) cleanupUserConn(ctx context.Context, user *User, conn net.Conn) error {
 	pro.userMutex.Lock()
 	defer pro.userMutex.Unlock()
-	sent, err := pro.reportUser(ctx, user, false)
-	err = user.RemoveConn(conn)
+	sent := pro.reportUser(ctx, user, false)
+	err := user.RemoveConn(conn)
 	if len(user.Conns) == 0 {
 		if !sent {
-			_, err = pro.reportUser(ctx, user, true)
+			pro.reportUser(ctx, user, true)
 		}
 		delete(pro.Users, user.ID)
 	}

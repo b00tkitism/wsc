@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,11 +20,15 @@ func (c *CustomAuth) Authenticate(ctx context.Context, auth string) (int64, erro
 	return 1, nil
 }
 
-var usage int64 = 0
+var usage atomic.Int64
+
+func init() {
+	usage.Store(0)
+}
 
 func (c *CustomAuth) ReportUsage(ctx context.Context, id int64, usedTraffic int64) error {
-	usage += usedTraffic
-	slog.Debug("updating user", slog.Int64("id", id), slog.Int64("used-traffic", usedTraffic), slog.Int64("usage", usage), slog.Float64("usage-MB", float64(usage)/1e6))
+	usage.Add(usedTraffic)
+	slog.Debug("updating user", slog.Int64("id", id), slog.Int64("used-traffic", usedTraffic), slog.Int64("usage", usage.Load()), slog.Float64("usage-MB", float64(usage.Load())/1e6))
 	return nil
 }
 
