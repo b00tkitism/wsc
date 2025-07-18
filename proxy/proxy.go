@@ -107,7 +107,7 @@ func (pro *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (pro *Proxy) pipeConn(ctx context.Context, user *User, conn net.Conn, target *net.TCPAddr) error {
-	if popedConn, err := user.AddConn(conn, pro.MaximumConnectionsPerUser); err != nil {
+	if popedConn, err := user.AddConn(conn); err != nil {
 		return err
 	} else {
 		if popedConn != nil {
@@ -140,7 +140,7 @@ func (pro *Proxy) pipeConn(ctx context.Context, user *User, conn net.Conn, targe
 
 func (pro *Proxy) pipeWSToTCP(ctx context.Context, user *User, wsConn net.Conn, tcpConn net.Conn) error {
 	wsReader := wsutil.NewReader(wsConn, ws.StateServerSide)
-	pack := make([]byte, 2048)
+	pack := user.WSBuffer(wsConn)
 
 	for {
 		if ctx.Err() != nil {
@@ -193,7 +193,7 @@ func (pro *Proxy) pipeWSToTCP(ctx context.Context, user *User, wsConn net.Conn, 
 }
 
 func (pro *Proxy) pipeTCPToWS(ctx context.Context, user *User, tcpConn net.Conn, wsConn net.Conn) error {
-	pack := make([]byte, 2048)
+	pack := user.TCPBuffer(wsConn)
 	for {
 		if ctx.Err() != nil {
 			return nil
