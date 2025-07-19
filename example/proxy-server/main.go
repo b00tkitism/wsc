@@ -15,9 +15,9 @@ var _ proxy.Authenticator = &CustomAuth{}
 type CustomAuth struct {
 }
 
-func (c *CustomAuth) Authenticate(ctx context.Context, auth string) (int64, error) {
+func (c *CustomAuth) Authenticate(ctx context.Context, auth string) (int64, int64, error) {
 	slog.Debug("authenticating : ", slog.String("auth", auth))
-	return 1, nil
+	return 1, 3 * 1024 * 1024, nil
 }
 
 var usage atomic.Int64

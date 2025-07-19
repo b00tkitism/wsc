@@ -4,6 +4,8 @@ import (
 	"encoding"
 	"encoding/json"
 	"errors"
+	"goftp.io/server/v2/ratelimit"
+	"io"
 	"math"
 	"net"
 	"sync"
@@ -15,8 +17,10 @@ const connReadSize = 2048
 var _ encoding.TextMarshaler = &User{}
 
 type connData struct {
-	time int64
-	id   int
+	time   int64
+	id     int
+	reader io.Reader
+	writer io.Writer
 }
 
 type User struct {
@@ -26,19 +30,20 @@ type User struct {
 
 	LastTrafficUpdateTick atomic.Int64
 	Conns                 map[net.Conn]connData
-
-	Heap []byte
+	Heap                  []byte
+	RateLimit             int64
 
 	connMutex    sync.Mutex
 	maxConnCount int
 	usedIds      []bool
 }
 
-func NewUser(id int64, usedTrafficBytes int64, maxConnCount int) *User {
+func NewUser(id int64, usedTrafficBytes int64, maxConnCount int, rateLimit int64) *User {
 	user := &User{
 		ID:           id,
 		Conns:        make(map[net.Conn]connData, maxConnCount),
 		Heap:         make([]byte, connReadSize*2*maxConnCount),
+		RateLimit:    rateLimit,
 		usedIds:      make([]bool, maxConnCount),
 		maxConnCount: maxConnCount,
 	}
@@ -68,6 +73,30 @@ func (user *User) WSBuffer(conn net.Conn) []byte {
 		return user.Heap[bufStart:bufEnd]
 	}
 	return make([]byte, connReadSize)
+}
+
+func (user *User) ConnReader(conn net.Conn) (io.Reader, error) {
+	user.connMutex.Lock()
+	defer user.connMutex.Unlock()
+	if d, found := user.Conns[conn]; found {
+		return d.reader, nil
+	}
+	return nil, errors.New("connection doesn't exist")
+}
+
+func (user *User) ConnWriter(conn net.Conn) (io.Writer, error) {
+	user.connMutex.Lock()
+	defer user.connMutex.Unlock()
+	if d, found := user.Conns[conn]; found {
+		return d.writer, nil
+	}
+	return nil, errors.New("connection doesn't exist")
+}
+
+func (user *User) ConnCount() int {
+	user.connMutex.Lock()
+	defer user.connMutex.Unlock()
+	return len(user.Conns)
 }
 
 func (user *User) AddConn(conn net.Conn) (net.Conn, error) {
@@ -100,8 +129,10 @@ func (user *User) AddConn(conn net.Conn) (net.Conn, error) {
 		}
 	}
 	user.Conns[conn] = connData{
-		time: nowns(),
-		id:   selectedConnId,
+		time:   nowns(),
+		id:     selectedConnId,
+		reader: ratelimit.Reader(conn, ratelimit.New(user.RateLimit)),
+		writer: ratelimit.Writer(conn, ratelimit.New(user.RateLimit)),
 	}
 	return selectedConn, nil
 }
@@ -115,6 +146,14 @@ func (user *User) RemoveConn(conn net.Conn) error {
 		return nil
 	}
 	return errors.New("connection doesn't exist")
+}
+
+func (user *User) Cleanup() {
+	user.connMutex.Lock()
+	defer user.connMutex.Unlock()
+	for conn := range user.Conns {
+		conn.Close()
+	}
 }
 
 func (user *User) MarshalText() (text []byte, err error) {

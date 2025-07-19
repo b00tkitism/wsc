@@ -17,7 +17,7 @@ import (
 var _ http.Handler = &Proxy{}
 
 type Authenticator interface {
-	Authenticate(ctx context.Context, auth string) (int64, error)
+	Authenticate(ctx context.Context, auth string) (int64, int64, error)
 	ReportUsage(ctx context.Context, id int64, usedTraffic int64) error
 }
 
@@ -55,7 +55,7 @@ func (pro *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	uid, err := pro.Auth.Authenticate(context.Background(), auth)
+	uid, rate, err := pro.Auth.Authenticate(context.Background(), auth)
 	if err != nil {
 		http.Error(writer, "Authentication failed: "+err.Error(), http.StatusBadRequest)
 		slog.Debug("Request failed. Authentication failed: "+err.Error(), slog.String("client", request.RemoteAddr))
@@ -72,7 +72,7 @@ func (pro *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	user := pro.findUser(ctx, uid)
+	user := pro.findUser(ctx, uid, rate)
 
 	endpoint := request.URL.Query().Get("ep")
 	tcpAddr, err := parseEndpoint(ctx, pro.ipResolver, endpoint)
@@ -107,11 +107,11 @@ func (pro *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (pro *Proxy) pipeConn(ctx context.Context, user *User, conn net.Conn, target *net.TCPAddr) error {
-	if popedConn, err := user.AddConn(conn); err != nil {
+	if poppedConn, err := user.AddConn(conn); err != nil {
 		return err
 	} else {
-		if popedConn != nil {
-			popedConn.Close()
+		if poppedConn != nil {
+			poppedConn.Close()
 		}
 	}
 
@@ -128,18 +128,26 @@ func (pro *Proxy) pipeConn(ctx context.Context, user *User, conn net.Conn, targe
 	eg.Go(func() error {
 		return pro.pipeWSToTCP(ctx, user, conn, tcpConn)
 	})
+	eg.Go(func() error {
+		err := pro.pipeTCPToWS(ctx, user, tcpConn, conn)
+		cancel()
+		return err
+	})
 
-	err = pro.pipeTCPToWS(ctx, user, tcpConn, conn)
-	cancel()
-	if egErr := eg.Wait(); egErr != nil {
-		err = egErr
-	}
-
-	return err
+	return eg.Wait()
 }
 
 func (pro *Proxy) pipeWSToTCP(ctx context.Context, user *User, wsConn net.Conn, tcpConn net.Conn) error {
-	wsReader := wsutil.NewReader(wsConn, ws.StateServerSide)
+	wsLReader, err := user.ConnReader(wsConn)
+	if err != nil {
+		return err
+	}
+	wsWriter, err := user.ConnWriter(wsConn)
+	if err != nil {
+		return err
+	}
+
+	wsReader := wsutil.NewReader(wsLReader, ws.StateServerSide)
 	pack := user.WSBuffer(wsConn)
 
 	for {
@@ -164,12 +172,12 @@ func (pro *Proxy) pipeWSToTCP(ctx context.Context, user *User, wsConn net.Conn, 
 
 		switch header.OpCode {
 		case ws.OpPing:
-			wsutil.WriteServerMessage(wsConn, ws.OpPong, nil)
+			wsutil.WriteServerMessage(wsWriter, ws.OpPong, nil)
 			continue
 		case ws.OpPong:
 			continue
 		case ws.OpClose:
-			wsutil.WriteServerMessage(wsConn, ws.OpClose, nil)
+			wsutil.WriteServerMessage(wsWriter, ws.OpClose, nil)
 			return nil
 		}
 
@@ -193,7 +201,13 @@ func (pro *Proxy) pipeWSToTCP(ctx context.Context, user *User, wsConn net.Conn, 
 }
 
 func (pro *Proxy) pipeTCPToWS(ctx context.Context, user *User, tcpConn net.Conn, wsConn net.Conn) error {
+	wsWriter, err := user.ConnWriter(wsConn)
+	if err != nil {
+		return err
+	}
+
 	pack := user.TCPBuffer(wsConn)
+
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -216,20 +230,20 @@ func (pro *Proxy) pipeTCPToWS(ctx context.Context, user *User, tcpConn net.Conn,
 
 		user.UsedTrafficBytes.Add(int64(n))
 
-		if err := wsutil.WriteServerBinary(wsConn, pack[:n]); err != nil {
+		if err := wsutil.WriteServerBinary(wsWriter, pack[:n]); err != nil {
 			return err
 		}
 	}
 }
 
-func (pro *Proxy) findUser(ctx context.Context, uid int64) *User {
+func (pro *Proxy) findUser(ctx context.Context, uid int64, rateLimit int64) *User {
 	pro.userMutex.Lock()
 	defer pro.userMutex.Unlock()
 	if user, exists := pro.Users[uid]; exists {
 		pro.reportUser(ctx, user, false)
 		return user
 	}
-	user := NewUser(uid, 0, pro.MaximumConnectionsPerUser)
+	user := NewUser(uid, 0, pro.MaximumConnectionsPerUser, rateLimit)
 	pro.Users[uid] = user
 	return user
 }
@@ -241,9 +255,7 @@ func (pro *Proxy) cleanupUser(ctx context.Context, uid int64) error {
 		return errors.New("user doesn't exist")
 	} else {
 		pro.reportUser(ctx, user, true)
-		for conn := range user.Conns {
-			conn.Close()
-		}
+		user.Cleanup()
 		delete(pro.Users, uid)
 		return nil
 	}
@@ -277,7 +289,7 @@ func (pro *Proxy) cleanupUserConn(ctx context.Context, user *User, conn net.Conn
 	defer pro.userMutex.Unlock()
 	sent := pro.reportUser(ctx, user, false)
 	err := user.RemoveConn(conn)
-	if len(user.Conns) == 0 {
+	if user.ConnCount() == 0 {
 		if !sent {
 			pro.reportUser(ctx, user, true)
 		}
