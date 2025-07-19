@@ -161,7 +161,7 @@ func main() {
 
 	proxy := socks.Proxy{
 		ServerAddr:   ":1080",
-		Proxyhandler: CustomHandler{Auth: "my-tockent-here", Host: "localhost:4040", Path: "/"},
+		Proxyhandler: CustomHandler{Auth: "mobinyentoken", Host: "localhost:4040", Path: "/"},
 		Timeout:      time.Second * 10,
 		Done:         make(chan struct{}),
 	}

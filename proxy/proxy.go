@@ -55,15 +55,20 @@ func (pro *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	uid, rate, err := pro.Auth.Authenticate(context.Background(), auth)
+	uid, rate, err := pro.Auth.Authenticate(ctx, auth)
 	if err != nil {
+		if uid != 0 {
+			if err := pro.cleanupUser(ctx, uid, false); err != nil {
+				slog.Debug("Request failed. Couldn't cleanup user: "+err.Error(), slog.String("client", request.RemoteAddr), slog.Int64("user-id", uid))
+			}
+		}
 		http.Error(writer, "Authentication failed: "+err.Error(), http.StatusBadRequest)
 		slog.Debug("Request failed. Authentication failed: "+err.Error(), slog.String("client", request.RemoteAddr))
 		return
 	}
 
 	if request.Method == "POST" && request.URL.Path == "/cleanup" {
-		if err := pro.cleanupUser(ctx, uid); err != nil {
+		if err := pro.cleanupUser(ctx, uid, true); err != nil {
 			http.Error(writer, "Failed to cleanup user: "+err.Error(), http.StatusInternalServerError)
 			slog.Debug("Request failed. Couldn't cleanup user: "+err.Error(), slog.String("client", request.RemoteAddr), slog.Int64("user-id", uid))
 			return
@@ -248,13 +253,13 @@ func (pro *Proxy) findUser(ctx context.Context, uid int64, rateLimit int64) *Use
 	return user
 }
 
-func (pro *Proxy) cleanupUser(ctx context.Context, uid int64) error {
+func (pro *Proxy) cleanupUser(ctx context.Context, uid int64, forceReport bool) error {
 	pro.userMutex.Lock()
 	defer pro.userMutex.Unlock()
 	if user, exists := pro.Users[uid]; !exists {
 		return errors.New("user doesn't exist")
 	} else {
-		pro.reportUser(ctx, user, true)
+		pro.reportUser(ctx, user, forceReport)
 		user.Cleanup()
 		delete(pro.Users, uid)
 		return nil
