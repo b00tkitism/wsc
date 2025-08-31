@@ -3,8 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
-	_ "github.com/mattn/go-sqlite3"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type Database struct {

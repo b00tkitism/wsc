@@ -4,13 +4,15 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"github.com/b00tkitism/wsc/proxy"
-	"github.com/itsabgr/ge"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"time"
+
+	"github.com/b00tkitism/wsc/proxy"
+	"github.com/itsabgr/ge"
 )
 
 var dbFilePath = flag.String("db", "./database.db", "sqlite database")
@@ -30,26 +32,26 @@ func main() {
 	}
 	defer db.Stop()
 
-	//if err := db.CreateUser(ctx, "mobinyentoken", 3*1024*1024, 1*1024*1024*1024, time.Minute*20); err != nil {
-	//	fmt.Println("err in adding mobin user : ", err)
-	//}
+	// if err := db.CreateUser(ctx, "mobinyentoken", 3*1024*1024, 1*1024*1024*1024, time.Minute*20); err != nil {
+	// 	fmt.Println("err in adding mobin user : ", err)
+	// }
 
-	//if err := db.ChargeUserService(ctx, "mobinyentoken", 10*1024*1024, 10*1024*1024*1024, time.Hour*24); err != nil {
-	//	fmt.Println("failed to charge service : ", err)
-	//} else {
-	//	fmt.Println("service charged!")
-	//}
+	if err := db.ChargeUserService(ctx, "mobinyentoken", 10*1024*1024, 150*1024*1024*1024, time.Hour*24*10); err != nil {
+		fmt.Println("failed to charge service : ", err)
+	} else {
+		fmt.Println("service charged!")
+	}
 
-	//if id, rate, err := (&CustomAuth{db}).Authenticate(ctx, "mobinyentoken"); err != nil {
-	//	fmt.Println("failed to authorize the token : ", err)
-	//} else {
-	//	fmt.Println("user id is : ", id, rate)
-	//	if err := (&CustomAuth{db}).ReportUsage(ctx, id, 1024*3); err != nil {
-	//		fmt.Println("failed to update traffic : ", err)
-	//	} else {
-	//		fmt.Println("updated users traffic!")
-	//	}
-	//}
+	// if id, rate, err := (&CustomAuth{db}).Authenticate(ctx, "mobinyentoken"); err != nil {
+	// 	fmt.Println("failed to authorize the token : ", err)
+	// } else {
+	// 	fmt.Println("user id is : ", id, rate)
+	// 	if err := (&CustomAuth{db}).ReportUsage(ctx, id, 1024*3); err != nil {
+	// 		fmt.Println("failed to update traffic : ", err)
+	// 	} else {
+	// 		fmt.Println("updated users traffic!")
+	// 	}
+	// }
 
 	pro := proxy.NewProxy(&CustomAuth{DB: db}, 60, time.Second*10, 1*1e6*1e4)
 

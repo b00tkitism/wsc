@@ -3,10 +3,11 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/b00tkitism/wsc/proxy"
 	"math"
 	"strconv"
 	"time"
+
+	"github.com/b00tkitism/wsc/proxy"
 )
 
 var _ proxy.Authenticator = &CustomAuth{}
@@ -18,7 +19,7 @@ type CustomAuth struct {
 func (cauth *CustomAuth) Authenticate(ctx context.Context, auth string) (int64, int64, error) {
 	id, rate, usedTraffic, totalTraffic, endTime, err := cauth.DB.FindUser(ctx, auth)
 	if err != nil {
-		return id, 0, errors.New("failed to find user '" + auth + "'")
+		return id, 0, errors.New("failed to find user '" + auth + "'. (Error: " + err.Error() + ")")
 	}
 	if time.Now().UnixNano() >= endTime {
 		return id, 0, errors.New("user service time exceeded '" + auth + "'(" + strconv.Itoa(int(id)) + ") at '" + time.Unix(0, endTime).String() + "'")

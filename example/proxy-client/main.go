@@ -3,10 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/firefart/gosocks"
-	"github.com/gobwas/ws"
-	"github.com/gobwas/ws/wsutil"
-	"github.com/itsabgr/ge"
 	"io"
 	"log/slog"
 	"net"
@@ -16,6 +12,11 @@ import (
 	"os/signal"
 	"strconv"
 	"time"
+
+	socks "github.com/firefart/gosocks"
+	"github.com/gobwas/ws"
+	"github.com/gobwas/ws/wsutil"
+	"github.com/itsabgr/ge"
 )
 
 var _ socks.ProxyHandler = &CustomHandler{}
@@ -160,8 +161,9 @@ func main() {
 	defer cancel()
 
 	proxy := socks.Proxy{
-		ServerAddr:   ":1080",
-		Proxyhandler: CustomHandler{Auth: "mobinyentoken", Host: "localhost:4040", Path: "/"},
+		ServerAddr: ":1080",
+		// Proxyhandler: CustomHandler{Auth: "mobinyentoken", Host: "localhost:4040", Path: "/"},
+		Proxyhandler: CustomHandler{Auth: "mobinyentoken", Host: "93.127.180.181:4040", Path: "/"},
 		Timeout:      time.Second * 10,
 		Done:         make(chan struct{}),
 	}
@@ -184,15 +186,16 @@ func main() {
 
 	dCtx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
-	if err := cleanup(dCtx, "mytoken"); err != nil {
+	if err := cleanup(dCtx, "mobinyentoken"); err != nil {
 		ge.Throw(err)
 	}
 }
 
 func cleanup(ctx context.Context, auth string) error {
 	sURL := url.URL{
-		Scheme:   "http",
-		Host:     "localhost:4040",
+		Scheme: "http",
+		// Host:     "localhost:4040",93.127.180.181:4040
+		Host:     "93.127.180.181:4040",
 		Path:     "/cleanup",
 		RawQuery: "",
 	}
