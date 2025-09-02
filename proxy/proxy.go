@@ -158,7 +158,7 @@ func (pro *Proxy) pipeConn(ctx context.Context, user *User, conn net.Conn, netwo
 
 			return eg.Wait()
 		}
-	case "udps":
+	case "udp":
 		{
 			udpAddr := &net.UDPAddr{
 				IP:   target.ip,
