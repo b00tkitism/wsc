@@ -3,15 +3,18 @@ package proxy
 import (
 	"context"
 	"errors"
-	"github.com/gobwas/ws"
-	"github.com/gobwas/ws/wsutil"
-	"golang.org/x/sync/errgroup"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/gobwas/ws"
+	"github.com/gobwas/ws/wsutil"
+	"golang.org/x/sync/errgroup"
 )
 
 var _ http.Handler = &Proxy{}
@@ -79,15 +82,21 @@ func (pro *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 
 	user := pro.findUser(ctx, uid, rate)
 
+	network := request.URL.Query().Get("net")
+	if network == "" {
+		network = "tcp"
+	}
+
 	endpoint := request.URL.Query().Get("ep")
-	tcpAddr, err := parseEndpoint(ctx, pro.ipResolver, endpoint)
+	// tcpAddr, err := parseEndpointTCP(ctx, pro.ipResolver, endpoint)
+	addr, err := parseEndpointAddr(ctx, pro.ipResolver, endpoint)
 	if err != nil {
 		http.Error(writer, "Failed to parse endpoint: "+err.Error(), http.StatusBadRequest)
-		slog.Debug("Request failed. Failed to parse endpoint: "+err.Error(), slog.String("client", request.RemoteAddr))
+		slog.Debug("Request failed. Failed to parse endpoint: "+err.Error(), slog.String("client", request.RemoteAddr), slog.String("net", network))
 		return
 	}
 
-	slog.Debug("New request", slog.String("client", request.RemoteAddr), slog.String("auth", auth), slog.Int64("user-id", uid), slog.String("tcp-addr", tcpAddr.String()))
+	slog.Debug("New request", slog.String("client", request.RemoteAddr), slog.String("auth", auth), slog.Int64("user-id", uid), slog.String(network+"-addr", addr.ip.String()+":"+strconv.Itoa(int(addr.port))))
 
 	conn, _, _, err := ws.UpgradeHTTP(request, writer)
 	if err != nil {
@@ -105,13 +114,13 @@ func (pro *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		}
 	}()
 
-	if err := pro.pipeConn(ctx, user, conn, tcpAddr); err != nil {
+	if err := pro.pipeConn(ctx, user, conn, network, addr); err != nil {
 		slog.Debug("Failed to pipe connection: "+err.Error(), slog.String("client", request.RemoteAddr), slog.Int64("user-id", uid))
 		http.Error(writer, "Failed to pipe connection: "+err.Error(), http.StatusInternalServerError)
 	}
 }
 
-func (pro *Proxy) pipeConn(ctx context.Context, user *User, conn net.Conn, target *net.TCPAddr) error {
+func (pro *Proxy) pipeConn(ctx context.Context, user *User, conn net.Conn, network string, target *endpointAddr) error {
 	if poppedConn, err := user.AddConn(conn); err != nil {
 		return err
 	} else {
@@ -120,26 +129,179 @@ func (pro *Proxy) pipeConn(ctx context.Context, user *User, conn net.Conn, targe
 		}
 	}
 
-	tcpConn, err := pro.dialer.DialContext(ctx, "tcp", target.String())
+	switch network {
+	case "tcp":
+		{
+			tcpAddr := &net.TCPAddr{
+				IP:   target.ip,
+				Port: int(target.port),
+				Zone: target.zone,
+			}
+			tcpConn, err := pro.dialer.DialContext(ctx, "tcp", tcpAddr.String())
+			if err != nil {
+				return err
+			}
+			defer tcpConn.Close()
+
+			eg, ctx := errgroup.WithContext(ctx)
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			eg.Go(func() error {
+				return pro.pipeWSToTCP(ctx, user, conn, tcpConn)
+			})
+			eg.Go(func() error {
+				err := pro.pipeTCPToWS(ctx, user, tcpConn, conn)
+				cancel()
+				return err
+			})
+
+			return eg.Wait()
+		}
+	case "udps":
+		{
+			udpAddr := &net.UDPAddr{
+				IP:   target.ip,
+				Port: int(target.port),
+				Zone: target.zone,
+			}
+			udpConn, err := net.ListenPacket("udp", "0.0.0.0:0")
+			if err != nil {
+				return err
+			}
+			defer udpConn.Close()
+
+			eg, ctx := errgroup.WithContext(ctx)
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			eg.Go(func() error {
+				return pro.pipeWSToUDP(ctx, user, conn, udpConn, udpAddr)
+			})
+			eg.Go(func() error {
+				err := pro.pipeUDPToWS(ctx, user, udpConn, conn, udpAddr)
+				cancel()
+				return err
+			})
+
+			return eg.Wait()
+		}
+	default:
+		return errors.New("Unknown network to pipe: " + network)
+	}
+}
+
+func (pro *Proxy) pipeWSToUDP(ctx context.Context, user *User, wsConn net.Conn, udpConn net.PacketConn, udpAddr *net.UDPAddr) error {
+	wsLReader, err := user.ConnReader(wsConn)
 	if err != nil {
 		return err
 	}
-	defer tcpConn.Close()
-
-	eg, ctx := errgroup.WithContext(ctx)
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	eg.Go(func() error {
-		return pro.pipeWSToTCP(ctx, user, conn, tcpConn)
-	})
-	eg.Go(func() error {
-		err := pro.pipeTCPToWS(ctx, user, tcpConn, conn)
-		cancel()
+	wsWriter, err := user.ConnWriter(wsConn)
+	if err != nil {
 		return err
-	})
+	}
 
-	return eg.Wait()
+	wsReader := wsutil.NewReader(wsLReader, ws.StateServerSide)
+	pack := user.InBuffer(wsConn)
+
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		if err := wsConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			return err
+		}
+
+		header, err := wsReader.NextFrame()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			if isTimeoutErr(err) {
+				continue
+			}
+			return err
+		}
+
+		switch header.OpCode {
+		case ws.OpPing:
+			wsutil.WriteServerMessage(wsWriter, ws.OpPong, nil)
+			continue
+		case ws.OpPong:
+			continue
+		case ws.OpClose:
+			wsutil.WriteServerMessage(wsWriter, ws.OpClose, nil)
+			return nil
+		}
+
+		for {
+			n, err := wsReader.Read(pack)
+			if n > 0 {
+				payload := packetConnPayload{}
+				if err := payload.UnmarshalBinaryUnsafe(pack[:n]); err != nil {
+					return err
+				}
+
+				if _, wErr := udpConn.WriteTo(payload.payload, net.UDPAddrFromAddrPort(payload.addrPort)); wErr != nil {
+					return wErr
+				} else {
+					user.UsedTrafficBytes.Add(int64(n))
+				}
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				return err
+			}
+		}
+	}
+}
+
+func (pro *Proxy) pipeUDPToWS(ctx context.Context, user *User, udpConn net.PacketConn, wsConn net.Conn, udpAddr *net.UDPAddr) error {
+	wsWriter, err := user.ConnWriter(wsConn)
+	if err != nil {
+		return err
+	}
+
+	pack := user.OutBuffer(wsConn)
+
+	payload := packetConnPayload{}
+
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		if err := udpConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			return err
+		}
+
+		n, netAddr, err := udpConn.ReadFrom(pack)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			if isTimeoutErr(err) {
+				continue
+			}
+			return err
+		}
+
+		payload.addrPort = netip.MustParseAddrPort(netAddr.String())
+		payload.payload = pack[:n]
+		payloadBytes, err := payload.MarshalBinary()
+		if err != nil {
+			return err
+		}
+
+		user.UsedTrafficBytes.Add(int64(n))
+
+		if err := wsutil.WriteServerBinary(wsWriter, payloadBytes); err != nil {
+			return err
+		}
+	}
 }
 
 func (pro *Proxy) pipeWSToTCP(ctx context.Context, user *User, wsConn net.Conn, tcpConn net.Conn) error {
@@ -153,7 +315,7 @@ func (pro *Proxy) pipeWSToTCP(ctx context.Context, user *User, wsConn net.Conn, 
 	}
 
 	wsReader := wsutil.NewReader(wsLReader, ws.StateServerSide)
-	pack := user.WSBuffer(wsConn)
+	pack := user.InBuffer(wsConn)
 
 	for {
 		if ctx.Err() != nil {
@@ -211,7 +373,7 @@ func (pro *Proxy) pipeTCPToWS(ctx context.Context, user *User, tcpConn net.Conn,
 		return err
 	}
 
-	pack := user.TCPBuffer(wsConn)
+	pack := user.OutBuffer(wsConn)
 
 	for {
 		if ctx.Err() != nil {

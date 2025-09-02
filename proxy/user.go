@@ -4,12 +4,13 @@ import (
 	"encoding"
 	"encoding/json"
 	"errors"
-	"goftp.io/server/v2/ratelimit"
 	"io"
 	"math"
 	"net"
 	"sync"
 	"sync/atomic"
+
+	"goftp.io/server/v2/ratelimit"
 )
 
 const connReadSize = 2048
@@ -53,7 +54,7 @@ func NewUser(id int64, usedTrafficBytes int64, maxConnCount int, rateLimit int64
 	return user
 }
 
-func (user *User) TCPBuffer(conn net.Conn) []byte {
+func (user *User) OutBuffer(conn net.Conn) []byte {
 	user.connMutex.Lock()
 	defer user.connMutex.Unlock()
 	if d, found := user.Conns[conn]; found {
@@ -64,7 +65,7 @@ func (user *User) TCPBuffer(conn net.Conn) []byte {
 	return make([]byte, connReadSize)
 }
 
-func (user *User) WSBuffer(conn net.Conn) []byte {
+func (user *User) InBuffer(conn net.Conn) []byte {
 	user.connMutex.Lock()
 	defer user.connMutex.Unlock()
 	if d, found := user.Conns[conn]; found {
